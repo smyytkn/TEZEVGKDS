@@ -184,7 +184,7 @@ if hesapla_btn:
         vals = [em_results[k]["CO2e_ton"] for k in RENK.keys()]
         ax.bar(ETIKET.values(), vals, color=RENK.values())
         ax.set_ylabel("Ton CO2e / Yıl")
-        st.pyplot(fig)
+        st.pyplot(fig, clear_figure=True)
 
     with t2:
         fig2, ax2 = plt.subplots(figsize=(10, 4))
