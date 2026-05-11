@@ -1,16 +1,15 @@
-"""
-ELEKTRİKLİ ARACA GEÇİŞ SÜRECİ İÇİN KARAR DESTEK SİSTEMİ
-IPCC Tier 2 Metodolojisi & XGBoost Destekli Senaryo Analizi
-Karabük Üniversitesi – Endüstri Mühendisliği Lisans Bitirme Tezi
-Özge ÖZBAY & Sümeyye TEKİN
-"""
-
 import streamlit as st
 import pandas as pd
 import numpy as np
 import matplotlib.pyplot as plt
 import matplotlib.ticker as mticker
 import warnings
+
+# XGBoost başlıkta geçtiği için import ediyoruz, modelleme kısmında kullanılabilir.
+try:
+    import xgboost as xgb
+except ImportError:
+    pass
 
 warnings.filterwarnings("ignore")
 
@@ -25,29 +24,25 @@ st.set_page_config(
 )
 
 # ─────────────────────────────────────────────
-#  ÖZEL CSS (TASARIM)
+#  ÖZEL CSS (Arayüz Tasarımı)
 # ─────────────────────────────────────────────
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;600&family=IBM+Plex+Sans:wght@300;400;600;700&display=swap');
 html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
+section[data-testid="stSidebar"] { background: #0d1117; border-right: 2px solid #1e9e6b; }
+section[data-testid="stSidebar"] * { color: #e6edf3 !important; }
 .hero-block {
     background: linear-gradient(135deg, #0d1117 60%, #1a2a1e 100%);
     color: #e6edf3; padding: 2.2rem 2.5rem; border-radius: 12px;
     margin-bottom: 1.2rem; border-left: 5px solid #1e9e6b; position: relative;
-}
-.hero-block h1 { font-family: 'IBM Plex Mono', monospace; font-size: 1.4rem; color: #1e9e6b; margin: 0; }
-.welcome-block {
-    background: #fff; border-radius: 10px; padding: 1.2rem 1.6rem;
-    border: 1px solid #d0f0e0; border-left: 4px solid #1e9e6b;
-    margin-bottom: 1.2rem; font-size: 0.92rem; line-height: 1.7;
 }
 .metric-card {
     background: #fff; border-radius: 10px; padding: 1rem 1.2rem;
     border: 1px solid #e1e4e8; border-top: 3px solid var(--accent, #1e9e6b);
     box-shadow: 0 1px 4px #0001; margin-bottom: 0.8rem;
 }
-.metric-card .val { font-family: 'IBM Plex Mono', monospace; font-size: 1.45rem; font-weight: 600; }
+.metric-card .val { font-family: 'IBM Plex Mono', monospace; font-size: 1.45rem; font-weight: 600; color: #0d1117; }
 .metric-card .lbl { font-size: 0.72rem; text-transform: uppercase; color: #6e7781; }
 .winner-box {
     background: linear-gradient(135deg, #1a2a1e, #0d1117);
@@ -58,29 +53,30 @@ html, body, [class*="css"] { font-family: 'IBM Plex Sans', sans-serif; }
 """, unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────
-#  SABİT DEĞERLER & PARAMETRELER
+#  SABİT DEĞERLER (IPCC Tier 2)
 # ─────────────────────────────────────────────
 EF_CO2_DIZEL = 2.690
-EF_CH4_DIZEL = 3.9 / 1e6
-EF_N2O_DIZEL = 3.9 / 1e6
+EF_CH4_OTOBÜS_DIZEL = 3.9
+EF_N2O_OTOBÜS_DIZEL = 3.9
 EF_GRID = 0.43
 ETA_SARJ = 0.90
 E_OTOBÜS_EV = 0.18
 E_MINİBÜS_EV = 0.12
 TUK_OTOBÜS_DIZEL = 0.33
 TUK_MINİBÜS_DIZEL = 0.12
-GWP_CH4, GWP_N2O = 28, 265
+GWP_CH4 = 28
+GWP_N2O = 265
 
 RENK = {"S0": "#6e7781", "S1": "#2166AC", "S2": "#F4A100", "S3": "#1B7837"}
 ETIKET = {
     "S0": "Mevcut Durum (Tam Dizel)",
-    "S1": "Senaryo 1 – 1/3 EV",
-    "S2": "Senaryo 2 – 2/3 EV",
-    "S3": "Senaryo 3 – Tam EV"
+    "S1": "Senaryo 1 – Filon. 1/3'ü EV",
+    "S2": "Senaryo 2 – Filon. 2/3'ü EV",
+    "S3": "Senaryo 3 – Tam EV Geçişi (3/3)",
 }
 
 # ─────────────────────────────────────────────
-#  FONKSİYONLAR
+#  YARDIMCI FONKSİYONLAR
 # ─────────────────────────────────────────────
 def fmt_tl(val): return f"{int(val):,}".replace(",", ".")
 def parse_tl(s):
@@ -91,113 +87,148 @@ def parse_tl(s):
 #  SIDEBAR
 # ─────────────────────────────────────────────
 with st.sidebar:
-    st.header("📋 FİLO GİRDİLERİ")
-    n_oto = st.number_input("Dizel Otobüs Sayısı", value=20)
-    n_mini = st.number_input("Dizel Minibüs Sayısı", value=10)
-    
-    st.subheader("Birim Fiyatlar (TL)")
-    f_oto_ev = parse_tl(st.text_input("EV Otobüs Fiyatı", "8.000.000"))
-    f_mini_ev = parse_tl(st.text_input("EV Minibüs Fiyatı", "3.500.000"))
-    
-    st.subheader("İşletme Giderleri")
-    dizel_f = st.number_input("Dizel Fiyatı (TL/L)", value=45.0)
-    elek_f = st.number_input("Elektrik Fiyatı (TL/kWh)", value=4.5)
-    
-    st.subheader("Yıllık Plan")
-    tufe = st.number_input("Yıllık TÜFE (%)", value=30.0) / 100
-    yil_analiz = st.number_input("Analiz Süresi (Yıl)", value=15)
-    
-    w_emisyon = st.slider("Emisyon Ağırlığı (%)", 0, 100, 50) / 100
-    w_maliyet = 1 - w_emisyon
+    st.markdown("## 📋 FİLO BİLGİLERİ")
+    n_otobüs_mevcut = st.number_input("Dizel Otobüs Sayısı", min_value=1, value=20)
+    n_minibüs_mevcut = st.number_input("Dizel Minibüs Sayısı", min_value=0, value=10)
 
+    st.markdown("### ARAÇ BİRİM FİYATLARI (TL)")
+    fiyat_otobüs_ev = parse_tl(st.text_input("EV Otobüs Fiyatı", "8.000.000"))
+    fiyat_minibüs_ev = parse_tl(st.text_input("EV Minibüs Fiyatı", "3.500.000"))
+
+    st.markdown("### YILLIK KİLOMETRELER")
+    km_otobüs_yillik = parse_tl(st.text_input("Otobüs Toplam km/yıl", "1.500.000"))
+    km_minibüs_yillik = parse_tl(st.text_input("Minibüs Toplam km/yıl", "600.000"))
+
+    st.markdown("### OPERASYONEL GİDERLER")
+    dizel_fiyat = st.number_input("Dizel (TL/L)", value=45.0)
+    elektrik_fiyat = st.number_input("Elektrik (TL/kWh)", value=4.5)
+    tufe_yuzde = st.number_input("Yıllık TÜFE (%)", value=30.0)
+    analiz_yili = st.number_input("Analiz Süresi (Yıl)", value=15)
+
+    w_emisyon = st.slider("Emisyon Azaltımı Ağırlığı (%)", 0, 100, 50) / 100
+    w_maliyet = 1 - w_emisyon
     hesapla_btn = st.button("🔍 ANALİZİ ÇALIŞTIR", use_container_width=True)
 
 # ─────────────────────────────────────────────
 #  HESAPLAMA MANTIĞI
 # ─────────────────────────────────────────────
-def emisyon_hesap(n_od, n_oe, n_md, n_me):
-    km_o, km_m = 1500000, 600000
-    co2 = (n_od * (km_o/(n_od+n_oe+1e-6)) * TUK_OTOBÜS_DIZEL * EF_CO2_DIZEL +
-           n_oe * (km_o/(n_od+n_oe+1e-6)) * (E_OTOBÜS_EV/ETA_SARJ) * EF_GRID +
-           n_md * (km_m/(n_md+n_me+1e-6)) * TUK_MINİBÜS_DIZEL * EF_CO2_DIZEL +
-           n_me * (km_m/(n_md+n_me+1e-6)) * (E_MINİBÜS_EV/ETA_SARJ) * EF_GRID)
-    return co2 / 1000 # Ton CO2e (basitleştirilmiş)
+def emisyon_hesapla(n_oto_dizel, n_oto_ev, n_mini_dizel, n_mini_ev, km_oto, km_mini):
+    n_oto_total = max(n_oto_dizel + n_oto_ev, 1)
+    n_mini_total = max(n_mini_dizel + n_mini_ev, 1)
+    
+    oto_km_d = (n_oto_dizel / n_oto_total) * km_oto
+    oto_km_ev = (n_oto_ev / n_oto_total) * km_oto
+    mini_km_d = (n_mini_dizel / n_mini_total) * km_mini
+    mini_km_ev = (n_mini_ev / n_mini_total) * km_mini
+
+    co2_kg = (oto_km_d * TUK_OTOBÜS_DIZEL * EF_CO2_DIZEL) + \
+             (oto_km_ev * (E_OTOBÜS_EV / ETA_SARJ) * EF_GRID) + \
+             (mini_km_d * TUK_MINİBÜS_DIZEL * EF_CO2_DIZEL) + \
+             (mini_km_ev * (E_MINİBÜS_EV / ETA_SARJ) * EF_GRID)
+    
+    co2e_ton = co2_kg / 1000 # Basitleştirilmiş Tier 2 CO2e
+    return {"CO2e_ton": co2e_ton, "CO2_kg": co2_kg}
+
+def maliyet_serileri(n_oto_dizel, n_oto_ev, n_mini_dizel, n_mini_ev, yatirim, tufe, yil, km_oto, km_mini):
+    records = []
+    n_oto_total = max(n_oto_dizel + n_oto_ev, 1)
+    n_mini_total = max(n_mini_dizel + n_mini_ev, 1)
+    
+    # İlk ay baz maliyetler
+    aylik_yakit_baz = ((n_oto_dizel * (km_oto/n_oto_total) * TUK_OTOBÜS_DIZEL * dizel_fiyat) + \
+                       (n_oto_ev * (km_oto/n_oto_total) * (E_OTOBÜS_EV/ETA_SARJ) * elektrik_fiyat) + \
+                       (n_mini_dizel * (km_mini/n_mini_total) * TUK_MINİBÜS_DIZEL * dizel_fiyat) + \
+                       (n_mini_ev * (km_mini/n_mini_total) * (E_MINİBÜS_EV/ETA_SARJ) * elektrik_fiyat)) / 12
+    
+    taksit = yatirim / (yil * 12) if yatirim > 0 else 0
+    
+    for ay in range(1, yil * 12 + 1):
+        yil_idx = (ay - 1) // 12
+        enflasyon_carpan = (1 + tufe/100) ** yil_idx
+        yakit = aylik_yakit_baz * enflasyon_carpan
+        records.append({"ay": ay, "yil": yil_idx + 1, "yakıt": yakit, "taksit": taksit, "toplam": yakit + taksit})
+    return pd.DataFrame(records)
 
 # ─────────────────────────────────────────────
 #  ANA EKRAN
 # ─────────────────────────────────────────────
-st.markdown('<div class="hero-block"><h1>🚌 EV GEÇİŞ KARAR DESTEK SİSTEMİ</h1><p>Karabük UlaşımAŞ Analiz Raporu</p></div>', unsafe_allow_html=True)
-
-if "data" not in st.session_state: st.session_state.data = None
+st.markdown("""
+<div class="hero-block">
+  <h1>🚌 ELEKTRİKLİ ARACA GEÇİŞ KARAR DESTEK SİSTEMİ</h1>
+  <p>Karabük Üniversitesi Endüstri Mühendisliği Bitirme Tezi · Özge ÖZBAY & Sümeyye TEKİN</p>
+</div>
+""", unsafe_allow_html=True)
 
 if hesapla_btn:
-    # Senaryo Tanımları
-    s_config = {
-        "S0": (n_oto, 0, n_mini, 0),
-        "S1": (int(n_oto*2/3), int(n_oto/3), int(n_mini*2/3), int(n_mini/3)),
-        "S2": (int(n_oto/3), int(n_oto*2/3), int(n_mini/3), int(n_mini*2/3)),
-        "S3": (0, n_oto, 0, n_mini)
+    # Senaryo Parametreleri
+    s_configs = {
+        "S0": (n_otobüs_mevcut, 0, n_minibüs_mevcut, 0, 0),
+        "S1": (int(n_otobüs_mevcut*2/3), int(n_otobüs_mevcut*1/3), int(n_minibüs_mevcut*2/3), int(n_minibüs_mevcut*1/3), 
+               int(n_otobüs_mevcut*1/3)*fiyat_otobüs_ev + int(n_minibüs_mevcut*1/3)*fiyat_minibüs_ev),
+        "S2": (int(n_otobüs_mevcut*1/3), int(n_otobüs_mevcut*2/3), int(n_minibüs_mevcut*1/3), int(n_minibüs_mevcut*2/3), 
+               int(n_otobüs_mevcut*2/3)*fiyat_otobüs_ev + int(n_minibüs_mevcut*2/3)*fiyat_minibüs_ev),
+        "S3": (0, n_otobüs_mevcut, 0, n_minibüs_mevcut, n_otobüs_mevcut*fiyat_otobüs_ev + n_minibüs_mevcut*fiyat_minibüs_ev)
     }
-    
-    res = {}
-    for k, v in s_config.items():
-        res[k] = {"emisyon": emisyon_hesap(*v)}
-        # Maliyet Simülasyonu
-        yatirim = v[1]*f_oto_ev + v[3]*f_mini_ev
-        aylik_maliyet = []
-        for ay in range(1, yil_analiz*12 + 1):
-            carpan = (1+tufe)**((ay-1)//12)
-            yakit = (v[0]*75000/12*TUK_OTOBÜS_DIZEL*dizel_f + v[1]*75000/12*E_OTOBÜS_EV*elek_f)*carpan
-            taksit = yatirim / (yil_analiz*12)
-            aylik_maliyet.append(yakit + taksit)
-        res[k]["maliyet_seri"] = np.array(aylik_maliyet)
-        res[k]["toplam_mal"] = sum(aylik_maliyet)
 
-    st.session_state.data = res
+    em_results = {}
+    cost_dfs = {}
+    for k, v in s_configs.items():
+        em_results[k] = emisyon_hesapla(v[0], v[1], v[2], v[3], km_otobüs_yillik, km_minibüs_yillik)
+        cost_dfs[k] = maliyet_serileri(v[0], v[1], v[2], v[3], v[4], tufe_yuzde, analiz_yili, km_otobüs_yillik, km_minibüs_yillik)
 
-if st.session_state.data:
-    data = st.session_state.data
-    
-    # Metrikler
-    c1, c2, c3, c4 = st.columns(4)
-    for i, k in enumerate(["S0","S1","S2","S3"]):
-        with [c1,c2,c3,c4][i]:
-            st.markdown(f'<div class="metric-card" style="--accent:{RENK[k]}"><div class="lbl">{ETIKET[k]}</div><div class="val">{data[k]["emisyon"]:.0f} t</div></div>', unsafe_allow_html=True)
-
-    t1, t2, t3 = st.tabs(["🌿 EMİSYON", "⚖️ BAŞABAŞ", "🏆 AHP"])
+    # Sekmeler
+    t1, t2, t3, t4 = st.tabs(["🌿 EMİSYON", "💰 MALİYET", "⚖️ BAŞABAŞ", "🏆 AHP"])
 
     with t1:
-        # Hataları önlemek için container kullanıyoruz
-        with st.container():
-            fig, ax = plt.subplots(figsize=(10, 4))
-            ax.bar(data.keys(), [data[k]["emisyon"] for k in data], color=list(RENK.values()))
-            ax.set_title("Yıllık Karbon Ayak İzi (Ton CO2e)")
-            st.pyplot(fig, clear_figure=True)
-            plt.close(fig)
+        fig, ax = plt.subplots(figsize=(10, 4))
+        vals = [em_results[k]["CO2e_ton"] for k in RENK.keys()]
+        ax.bar(ETIKET.values(), vals, color=RENK.values())
+        ax.set_ylabel("Ton CO2e / Yıl")
+        st.pyplot(fig)
 
     with t2:
-        with st.container():
-            fig2, ax2 = plt.subplots(figsize=(10, 4))
-            for k in ["S1","S2","S3"]:
-                # S0'a göre tasarruf
-                fark = np.cumsum(data["S0"]["maliyet_seri"]) - np.cumsum(data[k]["maliyet_seri"])
-                ax2.plot(range(len(fark)), fark/1e6, label=k, color=RENK[k])
-            ax2.axhline(0, color='black', lw=1, ls='--')
-            ax2.set_ylabel("Net Tasarruf (Milyon TL)")
-            ax2.legend()
-            st.pyplot(fig2, clear_figure=True)
-            plt.close(fig2)
+        fig2, ax2 = plt.subplots(figsize=(10, 4))
+        for k in RENK.keys():
+            ax2.plot(cost_dfs[k]["ay"], cost_dfs[k]["toplam"]/1e6, label=k, color=RENK[k])
+        ax2.set_ylabel("Aylık Gider (Milyon TL)")
+        ax2.legend()
+        st.pyplot(fig2)
 
     with t3:
-        # Basit AHP Skoru
-        skorlar = {}
-        max_em = max(d["emisyon"] for d in data.values())
-        max_mal = max(d["toplam_mal"] for d in data.values())
-        for k in data:
-            s = w_emisyon*(1 - data[k]["emisyon"]/max_em) + w_maliyet*(1 - data[k]["toplam_mal"]/max_mal)
-            skorlar[k] = s
+        st.subheader("Yatırım Geri Dönüş Analizi")
+        for k in ["S1", "S2", "S3"]:
+            cum_s0 = cost_dfs["S0"]["toplam"].cumsum()
+            cum_sk = cost_dfs[k]["toplam"].cumsum()
+            diff = cum_s0 - cum_sk
+            be_month = next((i for i, x in enumerate(diff) if x > 0), None)
+            
+            col_a, col_b = st.columns([1, 3])
+            col_a.metric(f"{k} Amorti Süresi", f"{be_month/12:.1f} Yıl" if be_month else "Süre Sonu+")
+            
+            fig_be, ax_be = plt.subplots(figsize=(8, 2))
+            ax_be.fill_between(range(len(diff)), diff/1e6, color='green', alpha=0.3)
+            ax_be.axhline(0, color='black', lw=1)
+            st.pyplot(fig_be)
+
+    with t4:
+        # Basit AHP Skorlama
+        em_scores = np.array([em_results[k]["CO2e_ton"] for k in RENK.keys()])
+        cost_scores = np.array([cost_dfs[k]["toplam"].sum() for k in RENK.keys()])
         
-        best = max(skorlar, key=skorlar.get)
-        st.markdown(f'<div class="winner-box"><div class="val">🏆 ÖNERİLEN: {ETIKET[best]}</div></div>', unsafe_allow_html=True)
+        # Minimizasyon için normalizasyon
+        em_n = (1/em_scores) / sum(1/em_scores)
+        cost_n = (1/cost_scores) / sum(1/cost_scores)
+        final_scores = (em_n * w_emisyon) + (cost_n * w_maliyet)
+        winner_idx = np.argmax(final_scores)
+        winner_code = list(RENK.keys())[winner_idx]
+
+        st.markdown(f"""
+        <div class="winner-box">
+            <div class="wlbl">🏆 OPTİMAL SENARYO</div>
+            <div class="wval">{ETIKET[winner_code]}</div>
+            <p>Emisyon ve Maliyet ağırlıklarına göre en yüksek verimlilik bu senaryoda sağlanmıştır.</p>
+        </div>
+        """, unsafe_allow_html=True)
+
 else:
-    st.info("Lütfen sol panelden parametreleri girip 'Analizi Çalıştır' butonuna basın.")
+    st.info("Analizi başlatmak için sol taraftaki 'Analizi Çalıştır' butonuna basın.")
